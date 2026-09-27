@@ -1,0 +1,20 @@
+{
+  "name": "b2-ownerrez-automation",
+  "version": "1.0.0",
+  "description": "Receives OwnerRez new-message webhooks, triages them with Claude, and logs work orders.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

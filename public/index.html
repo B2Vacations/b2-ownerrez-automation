@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>B2 OwnerRez Automation — Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Work Sans", sans-serif; background:#FAF8F6; color:#1E2430; margin:0; padding:24px; }
+  h1 { color:#0F2A44; font-size:20px; }
+  .card { background:#fff; border:1px solid #E7E1DA; border-radius:12px; padding:14px; margin-bottom:10px; }
+  .row { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; align-items:center; }
+  .chip { border-radius:999px; padding:2px 10px; font-size:12px; font-weight:600; }
+  .chip.emergency { background:#FBEAE8; color:#C0392B; }
+  .chip.high { background:#FDF1E1; color:#B4650A; }
+  .chip.routine { background:#E7F5EC; color:#1E7A46; }
+  select, button { border-radius:8px; border:1px solid #E7E1DA; padding:6px 10px; font-size:13px; }
+  .muted { color:#5B6472; font-size:12px; }
+  textarea, input[type=text] { width:100%; box-sizing:border-box; padding:8px; border-radius:8px; border:1px solid #E7E1DA; }
+</style>
+</head>
+<body>
+  <h1>B2 OwnerRez Automation</h1>
+  <p class="muted">Work orders created automatically from OwnerRez guest message webhooks.</p>
+
+  <div class="card">
+    <strong>Test the AI triage manually</strong>
+    <div style="margin-top:8px">
+      <input id="t_property" type="text" placeholder="Property / unit" style="margin-bottom:6px" />
+      <textarea id="t_message" rows="2" placeholder="Paste a guest message to test triage"></textarea>
+      <button id="t_run" style="margin-top:6px">Run Triage</button>
+      <pre id="t_result" class="muted" style="white-space:pre-wrap"></pre>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <strong>Test the full guest AI (conversation, tone, escalation routing)</strong>
+      <button id="btnNewTestConvo">New Test Conversation</button>
+    </div>
+    <p class="muted" style="margin:6px 0">Uses a fake sample property (WiFi, door code, check-in/out time already filled in) — no OwnerRez connection needed. Multi-turn: keep sending messages in the same test thread to check it remembers context.</p>
+    <div id="testChatLog" style="margin:10px 0"></div>
+    <textarea id="tc_message" rows="2" placeholder="Try: what's the wifi password and what time is checkout? / the AC isn't working / can I get a discount"></textarea>
+    <button id="tc_send" style="margin-top:6px">Send as Guest</button>
+  </div>
+
+  <div id="list"></div>
+
+  <h1 style="margin-top:28px">Properties (synced from OwnerRez)</h1>
+  <div class="row" style="margin-bottom:10px">
+    <p class="muted" style="margin:0">Cached property list, used to link every work order to a real OwnerRez unit. Syncs automatically every 6 hours, or click to refresh now.</p>
+    <button id="btnSyncProps">Sync Now</button>
+  </div>
+  <div id="properties"></div>
+
+  <h1 style="margin-top:28px">All Conversations</h1>
+  <p class="muted">Jump into any thread yourself, then hit "Pause AI" so it stops responding while you handle it — turn it back on when you're done.</p>
+  <div id="allConvos"></div>
+
+  <h1 style="margin-top:28px">Paused Conversations (staff took over)</h1>
+  <p class="muted">When a team member replies directly in OwnerRez, the bot steps back from that thread automatically. Resume here once you're done handling it manually.</p>
+  <div id="paused"></div>
+
+  <h1 style="margin-top:28px">Questions AI Couldn't Answer</h1>
+  <p class="muted">These are gaps in your OwnerRez property fields (WiFi, House Manual, Directions, Check-in Instructions) — add the missing info there and future guests with the same question get answered automatically.</p>
+  <div id="gaps"></div>
+
+<script>
+async function load() {
+  const res = await fetch("/api/work-orders");
+  const orders = await res.json();
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  if (orders.length === 0) {
+    list.innerHTML = '<p class="muted">No work orders yet — they will appear here once a webhook comes in.</p>';
+    return;
+  }
+  orders.forEach(function (o) {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML =
+      '<div class="row"><strong>' + escapeHtml(o.title) + '</strong>' +
+      '<span class="chip ' + o.priority + '">' + o.priority + '</span></div>' +
+      '<div class="muted">' + escapeHtml(o.property) +
+      (o.ownerrez_property_id ? ' (OR #' + escapeHtml(o.ownerrez_property_id) + ')' : ' <span style="color:#B4650A">— not linked to an OwnerRez property</span>') +
+      ' · ' + o.category + ' · ' + o.source + '</div>' +
+      '<div style="margin-top:6px">' + escapeHtml(o.description || "") + '</div>' +
+      (o.guest_message ? '<div class="muted" style="margin-top:4px;font-style:italic">"' + escapeHtml(o.guest_message) + '"</div>' : '') +
+      '<div class="row" style="margin-top:8px">' +
+      '<span class="muted">Assigned: ' + escapeHtml(o.assignee) + ' · ' + o.created_at + '</span>' +
+      '<select data-id="' + o.id + '">' +
+      '<option value="new"' + (o.status === "new" ? " selected" : "") + '>New</option>' +
+      '<option value="in_progress"' + (o.status === "in_progress" ? " selected" : "") + '>In Progress</option>' +
+      '<option value="completed"' + (o.status === "completed" ? " selected" : "") + '>Completed</option>' +
+      '</select></div>';
+    div.querySelector("select").addEventListener("change", async function (e) {
+      await fetch("/api/work-orders/" + o.id + "/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: e.target.value })
+      });
+    });
+    list.appendChild(div);
+  });
+}
+function escapeHtml(s) {
+  return String(s || "").replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+async function loadAllConvos() {
+  const res = await fetch("/api/conversations");
+  const rows = await res.json();
+  const wrap = document.getElementById("allConvos");
+  wrap.innerHTML = "";
+  if (rows.length === 0) {
+    wrap.innerHTML = '<p class="muted">No conversations yet.</p>';
+    return;
+  }
+  rows.forEach(function (c) {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML =
+      '<div class="row"><strong>Thread ' + escapeHtml(c.thread_id) + '</strong>' +
+      '<button class="toggle-pause-btn">' + (c.paused ? "Resume AI" : "Pause AI") + '</button></div>' +
+      '<div class="muted" style="margin-top:4px">' + (c.paused ? "⏸ Paused · " : "") + escapeHtml((c.last_message || "").slice(0, 140)) + '</div>' +
+      '<div class="muted">' + c.last_activity + '</div>';
+    div.querySelector(".toggle-pause-btn").addEventListener("click", async function (e) {
+      e.target.disabled = true;
+      const endpoint = c.paused ? "resume" : "pause";
+      await fetch("/api/threads/" + encodeURIComponent(c.thread_id) + "/" + endpoint, { method: "POST" });
+      loadAllConvos();
+      loadPaused();
+    });
+    wrap.appendChild(div);
+  });
+}
+async function loadPaused() {
+  const res = await fetch("/api/paused-threads");
+  const rows = await res.json();
+  const wrap = document.getElementById("paused");
+  wrap.innerHTML = "";
+  if (rows.length === 0) {
+    wrap.innerHTML = '<p class="muted">No paused conversations right now.</p>';
+    return;
+  }
+  rows.forEach(function (t) {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML =
+      '<div class="row"><strong>Thread ' + escapeHtml(t.thread_id) + '</strong>' +
+      '<button class="resume-btn">Resume AI</button></div>' +
+      '<div class="muted" style="margin-top:4px">' + escapeHtml(t.reason || "") + ' · ' + t.paused_at + '</div>';
+    div.querySelector(".resume-btn").addEventListener("click", async function (e) {
+      e.target.disabled = true;
+      await fetch("/api/threads/" + encodeURIComponent(t.thread_id) + "/resume", { method: "POST" });
+      loadPaused();
+    });
+    wrap.appendChild(div);
+  });
+}
+async function loadGaps() {
+  const res = await fetch("/api/unanswered-questions");
+  const rows = await res.json();
+  const wrap = document.getElementById("gaps");
+  wrap.innerHTML = "";
+  if (rows.length === 0) {
+    wrap.innerHTML = '<p class="muted">None yet.</p>';
+    return;
+  }
+  rows.forEach(function (r) {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML =
+      '<div class="muted">' + escapeHtml(r.property) + ' · ' + r.created_at + '</div>' +
+      '<div style="margin-top:4px">' + escapeHtml(r.question) + '</div>' +
+      (r.answer ? '<div class="muted" style="margin-top:4px;font-style:italic">Sent: "' + escapeHtml(r.answer) + '"</div>' : '') +
+      '<button class="view-convo" data-thread="' + escapeHtml(r.thread_id) + '" style="margin-top:6px">View full conversation</button>' +
+      '<div class="convo-box muted" style="margin-top:6px;white-space:pre-wrap;display:none"></div>';
+    div.querySelector(".view-convo").addEventListener("click", async function () {
+      const box = div.querySelector(".convo-box");
+      if (box.style.display === "block") { box.style.display = "none"; return; }
+      const res2 = await fetch("/api/conversation/" + encodeURIComponent(r.thread_id));
+      const turns = await res2.json();
+      box.textContent = turns.map(function (t) { return (t.role === "user" ? "Guest: " : "AI: ") + t.content; }).join("\n\n");
+      box.style.display = "block";
+    });
+    wrap.appendChild(div);
+  });
+}
+async function loadProperties() {
+  const res = await fetch("/api/properties");
+  const rows = await res.json();
+  const wrap = document.getElementById("properties");
+  wrap.innerHTML = "";
+  if (rows.length === 0) {
+    wrap.innerHTML = '<p class="muted">No properties synced yet — connect OwnerRez, then click "Sync Now."</p>';
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.style.display = "grid";
+  grid.style.gridTemplateColumns = "repeat(auto-fill, minmax(220px, 1fr))";
+  grid.style.gap = "6px";
+  rows.forEach(function (p) {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.style.padding = "8px 10px";
+    div.innerHTML = '<div>' + escapeHtml(p.name) + '</div><div class="muted">OR #' + escapeHtml(p.ownerrez_property_id) + '</div>';
+    grid.appendChild(div);
+  });
+  wrap.appendChild(grid);
+}
+document.getElementById("btnSyncProps").addEventListener("click", async function () {
+  const btn = document.getElementById("btnSyncProps");
+  btn.disabled = true;
+  btn.textContent = "Syncing…";
+  try {
+    const res = await fetch("/api/properties/sync", { method: "POST" });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    await loadProperties();
+    btn.textContent = "Sync Now";
+  } catch (e) {
+    btn.textContent = "Sync failed — retry";
+  } finally {
+    btn.disabled = false;
+  }
+});
+var testThreadId = "t" + Date.now();
+function renderTestBubble(role, text, meta) {
+  const log = document.getElementById("testChatLog");
+  const bubble = document.createElement("div");
+  bubble.style.margin = "6px 0";
+  bubble.style.padding = "8px 10px";
+  bubble.style.borderRadius = "10px";
+  bubble.style.maxWidth = "80%";
+  if (role === "user") {
+    bubble.style.background = "#E7F0FA";
+    bubble.style.marginLeft = "auto";
+    bubble.textContent = text;
+  } else {
+    bubble.style.background = "#fff";
+    bubble.style.border = "1px solid #E7E1DA";
+    bubble.innerHTML = escapeHtml(text) + (meta ? '<div class="muted" style="margin-top:4px">' + escapeHtml(meta) + '</div>' : '');
+  }
+  log.appendChild(bubble);
+  log.scrollTop = log.scrollHeight;
+}
+document.getElementById("btnNewTestConvo").addEventListener("click", function () {
+  testThreadId = "t" + Date.now();
+  document.getElementById("testChatLog").innerHTML = '<p class="muted">New test conversation started.</p>';
+});
+document.getElementById("tc_send").addEventListener("click", async function () {
+  const box = document.getElementById("tc_message");
+  const message = box.value.trim();
+  if (!message) return;
+  renderTestBubble("user", message);
+  box.value = "";
+  const btn = document.getElementById("tc_send");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/test-guestqa", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: message, threadId: testThreadId })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const meta = data.escalate
+      ? "→ escalated: " + data.escalationType + (data.category ? " (" + data.category + (data.priority ? ", " + data.priority : "") + ")" : "")
+      : "→ answered, no escalation";
+    renderTestBubble("ai", data.reply || "(no reply generated)", meta);
+  } catch (e) {
+    renderTestBubble("ai", "Error: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+document.getElementById("t_run").addEventListener("click", async function () {
+  const property = document.getElementById("t_property").value;
+  const message = document.getElementById("t_message").value;
+  document.getElementById("t_result").textContent = "Thinking…";
+  const res = await fetch("/api/test-triage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ property, message })
+  });
+  const data = await res.json();
+  document.getElementById("t_result").textContent = JSON.stringify(data, null, 2);
+});
+load();
+setInterval(load, 15000);
+loadAllConvos();
+setInterval(loadAllConvos, 15000);
+loadPaused();
+setInterval(loadPaused, 15000);
+loadGaps();
+setInterval(loadGaps, 15000);
+loadProperties();
+setInterval(loadProperties, 30000);
+</script>
+</body>
+</html>
